@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { sendVendorReminderEmail } from "@/lib/email/vendor-emails";
+import { captureServerEvent } from "@/lib/posthog/events";
 import { getSupabaseAdmin } from "@/lib/supabase/admin";
 import { createVendorPortalInvite } from "@/lib/vendor-portal/tokens";
 
@@ -172,6 +173,12 @@ export async function GET(request: Request) {
         subject,
         body: `Automated reminder sent for ${requirement.name}. Secure portal link expires in 14 days.`,
         sent_at: new Date().toISOString(),
+      });
+      await captureServerEvent("reminder_sent", {
+        organization_id: requirement.organization_id,
+        vendor_id: requirement.vendor_id,
+        requirement_id: requirement.id,
+        days_until_expiration: daysUntilExpiration,
       });
 
       await admin

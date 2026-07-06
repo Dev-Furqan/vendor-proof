@@ -1,5 +1,3 @@
-"use client";
-
 import {
   AlertTriangle,
   BellRing,
@@ -9,16 +7,7 @@ import {
   ShieldCheck,
   Table2,
 } from "lucide-react";
-import {
-  motion,
-  useScroll,
-  useSpring,
-  useTransform,
-  type MotionValue,
-} from "framer-motion";
-import { useRef, type ReactNode } from "react";
-
-const ease = [0.22, 1, 0.36, 1] as const;
+import type { ReactNode } from "react";
 
 type FadeUpProps = {
   children: ReactNode;
@@ -28,15 +17,14 @@ type FadeUpProps = {
 
 export function FadeUp({ children, className, delay = 0 }: FadeUpProps) {
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 28 }}
-      whileInView={{ opacity: 1, y: 0 }}
-      viewport={{ once: true, amount: 0.28 }}
-      transition={{ duration: 0.7, delay, ease }}
-      className={["min-w-0 max-w-full", className].filter(Boolean).join(" ")}
+    <div
+      style={{ animationDelay: `${delay}s` }}
+      className={["min-w-0 max-w-full animate-[fadeUp_0.7s_ease-out_both]", className]
+        .filter(Boolean)
+        .join(" ")}
     >
       {children}
-    </motion.div>
+    </div>
   );
 }
 
@@ -65,12 +53,9 @@ export function ProblemCards() {
         const Icon = problem.icon;
 
         return (
-          <motion.article
+          <article
             key={problem.title}
-            initial={{ opacity: 0, y: 26 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true, amount: 0.35 }}
-            transition={{ duration: 0.65, delay: index * 0.08, ease }}
+            style={{ animationDelay: `${index * 0.08}s` }}
             className="rounded-lg border border-white/10 bg-white/[0.035] p-6 shadow-[0_24px_80px_rgba(0,0,0,0.22)]"
           >
             <div className="mb-8 flex size-10 items-center justify-center rounded-md border border-accent/20 bg-accent/10 text-accent">
@@ -78,7 +63,7 @@ export function ProblemCards() {
             </div>
             <h3 className="text-lg font-medium text-white">{problem.title}</h3>
             <p className="mt-3 text-sm leading-6 text-muted">{problem.text}</p>
-          </motion.article>
+          </article>
         );
       })}
     </div>
@@ -103,63 +88,18 @@ const steps = [
   },
 ];
 
-function StepCard({
-  index,
-  progress,
-  children,
-}: {
-  index: number;
-  progress: MotionValue<number>;
-  children: ReactNode;
-}) {
-  const opacity = useTransform(
-    progress,
-    [index * 0.25, index * 0.25 + 0.18],
-    [0.38, 1],
-  );
-  const y = useTransform(
-    progress,
-    [index * 0.25, index * 0.25 + 0.18],
-    [18, 0],
-  );
-
-  return (
-    <motion.div style={{ opacity, y }} className="relative">
-      {children}
-    </motion.div>
-  );
-}
-
 export function HowItWorksFlow() {
-  const ref = useRef<HTMLDivElement>(null);
-  const { scrollYProgress } = useScroll({
-    target: ref,
-    offset: ["start 78%", "end 45%"],
-  });
-  const scaleX = useSpring(scrollYProgress, {
-    stiffness: 92,
-    damping: 24,
-    mass: 0.35,
-  });
-
   return (
-    <div ref={ref} className="relative">
+    <div className="relative">
       <div className="absolute left-6 right-6 top-[3.1rem] hidden h-px bg-white/10 md:block" />
-      <motion.div
-        style={{ scaleX }}
-        className="absolute left-6 right-6 top-[3.1rem] hidden h-px origin-left bg-accent md:block"
-      />
+      <div className="absolute left-6 right-6 top-[3.1rem] hidden h-px origin-left bg-accent md:block" />
 
       <div className="grid gap-4 md:grid-cols-3">
         {steps.map((step, index) => {
           const Icon = step.icon;
 
           return (
-            <StepCard
-              key={step.title}
-              index={index}
-              progress={scrollYProgress}
-            >
+            <div key={step.title} className="relative">
               <article className="rounded-lg border border-white/10 bg-[#0b1220]/80 p-6">
                 <div className="relative z-10 flex size-12 items-center justify-center rounded-full border border-accent/25 bg-background text-accent shadow-[0_0_0_8px_rgba(7,17,31,0.95)]">
                   <Icon size={20} strokeWidth={1.8} />
@@ -172,7 +112,7 @@ export function HowItWorksFlow() {
                 </h3>
                 <p className="mt-3 text-sm leading-6 text-muted">{step.text}</p>
               </article>
-            </StepCard>
+            </div>
           );
         })}
       </div>
@@ -195,17 +135,8 @@ const statusStyles = {
 };
 
 export function DashboardPreview() {
-  const ref = useRef<HTMLDivElement>(null);
-  const { scrollYProgress } = useScroll({
-    target: ref,
-    offset: ["start end", "end start"],
-  });
-  const y = useTransform(scrollYProgress, [0, 1], [34, -34]);
-
   return (
-    <motion.div
-      ref={ref}
-      style={{ y }}
+    <div
       className="overflow-hidden rounded-lg border border-white/10 bg-[#0a101c] shadow-[0_34px_120px_rgba(0,0,0,0.45)]"
     >
       <div className="flex items-center justify-between border-b border-white/10 px-4 py-3">
@@ -281,7 +212,7 @@ export function DashboardPreview() {
           </div>
         </div>
       </div>
-    </motion.div>
+    </div>
   );
 }
 

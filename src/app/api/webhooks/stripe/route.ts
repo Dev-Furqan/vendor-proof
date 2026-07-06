@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import Stripe from "stripe";
 import { billingPlans, getBillingPlan } from "@/lib/billing/plans";
+import { captureServerEvent } from "@/lib/posthog/events";
 import { getStripe } from "@/lib/stripe/client";
 import { getSupabaseAdmin } from "@/lib/supabase/admin";
 
@@ -173,6 +174,13 @@ export async function POST(request: Request) {
           session.subscription,
         )) as SubscriptionWithPeriods;
         await upsertSubscription(subscription);
+        if (session.metadata?.organization_id) {
+          await captureServerEvent("checkout_completed", {
+            organization_id: session.metadata.organization_id,
+            plan: session.metadata.plan,
+            stripe_session_id: session.id,
+          });
+        }
       }
       break;
     }

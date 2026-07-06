@@ -1,6 +1,6 @@
-import dynamic from "next/dynamic";
 import Link from "next/link";
 import { Check, ChevronRight, ShieldCheck } from "lucide-react";
+import { IdleHeroVisual } from "@/components/marketing/idle-hero-visual";
 import {
   DashboardPreview,
   FadeUp,
@@ -8,11 +8,6 @@ import {
   ProblemCards,
   ReminderStrip,
 } from "@/components/marketing/landing-motion";
-
-const HeroVisual = dynamic(() => import("@/components/marketing/hero-visual"), {
-  ssr: false,
-  loading: () => <HeroVisualSkeleton />,
-});
 
 const navLinks = ["Product", "Workflow", "Pricing", "Customers"];
 
@@ -49,15 +44,6 @@ const pricing = [
 ];
 
 const logos = ["Northstar", "Harbor Group", "UrbanKey", "SlateWorks", "LeasePoint"];
-
-function HeroVisualSkeleton() {
-  return (
-    <div className="relative h-[360px] w-full overflow-hidden rounded-lg border border-white/10 bg-white/[0.035] md:h-[470px]">
-      <div className="absolute left-1/2 top-1/2 h-44 w-64 -translate-x-1/2 -translate-y-1/2 animate-pulse rounded-md border border-accent/15 bg-accent/5" />
-      <div className="absolute left-1/2 top-1/2 h-28 w-52 -translate-x-[42%] -translate-y-[38%] animate-pulse rounded-md border border-white/10 bg-white/5" />
-    </div>
-  );
-}
 
 function SectionHeading({
   eyebrow,
@@ -162,7 +148,7 @@ export default function MarketingPage() {
           <FadeUp delay={0.12} className="relative">
             <div className="absolute inset-6 rounded-full bg-accent/8 blur-3xl" />
             <div className="relative h-[360px] w-full md:h-[470px]">
-              <HeroVisual />
+              <IdleHeroVisual />
             </div>
           </FadeUp>
         </div>

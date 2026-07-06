@@ -3,6 +3,7 @@
 import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { ensureUserWorkspace } from "@/lib/auth/workspace";
+import { captureServerEvent } from "@/lib/posthog/events";
 import { createClient } from "@/lib/supabase/server";
 
 function getSiteUrl() {
@@ -68,11 +69,16 @@ export async function signUpWithPassword(formData: FormData) {
   }
 
   try {
-    await ensureUserWorkspace({
+    const organizationId = await ensureUserWorkspace({
       userId: signedUpUser.id,
       email: signedUpUser.email ?? email,
       fullName,
       avatarUrl: signedUpUser.user_metadata?.avatar_url,
+    });
+    await captureServerEvent("signup_completed", {
+      organization_id: organizationId,
+      user_id: signedUpUser.id,
+      provider: "password",
     });
   } catch (workspaceError) {
     authError(

@@ -1,5 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { ensureUserWorkspace } from "@/lib/auth/workspace";
+import { captureServerEvent } from "@/lib/posthog/events";
 import { createClient } from "@/lib/supabase/server";
 
 export async function GET(request: NextRequest) {
@@ -52,11 +53,16 @@ export async function GET(request: NextRequest) {
 
   if (user) {
     try {
-      await ensureUserWorkspace({
+      const organizationId = await ensureUserWorkspace({
         userId: user.id,
         email: user.email,
         fullName: user.user_metadata?.full_name ?? user.user_metadata?.name,
         avatarUrl: user.user_metadata?.avatar_url,
+      });
+      await captureServerEvent("signup_completed", {
+        organization_id: organizationId,
+        user_id: user.id,
+        provider: "google",
       });
     } catch (workspaceError) {
       return NextResponse.redirect(
