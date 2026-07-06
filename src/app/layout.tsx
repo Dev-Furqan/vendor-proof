@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import localFont from "next/font/local";
+import { AppProviders } from "@/components/providers/app-providers";
 import "./globals.css";
 
 const geistSans = localFont({
@@ -14,8 +15,9 @@ const geistMono = localFont({
 });
 
 export const metadata: Metadata = {
-  title: "VendorProof",
-  description: "VendorProof application scaffold",
+  title: "VendorProof | Vendor compliance without the chase",
+  description:
+    "VendorProof helps property managers track vendor COIs, licenses, and W-9s with automated renewal reminders.",
 };
 
 export default function RootLayout({
@@ -25,7 +27,9 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" className={`${geistSans.variable} ${geistMono.variable}`}>
-      <body className="min-h-screen bg-background text-foreground antialiased">{children}</body>
+      <body className="min-h-screen bg-background text-foreground antialiased">
+        <AppProviders>{children}</AppProviders>
+      </body>
     </html>
   );
 }

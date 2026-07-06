@@ -3,14 +3,16 @@
 @tailwind utilities;
 
 :root {
-  --background: #07111f;
-  --surface: #0f1b2a;
-  --surface-muted: #162336;
-  --foreground: #f6f2e8;
-  --muted: #a6b0bf;
+  --background: #05070d;
+  --surface: #0b111d;
+  --surface-muted: #111827;
+  --foreground: #f7f8fb;
+  --muted: #9ba6b6;
   --accent: #22f2d2;
-  --accent-foreground: #061017;
-  --border: #27364a;
+  --accent-foreground: #04100e;
+  --border: #202938;
+  --font-display: var(--font-geist-sans), "Segoe UI", Arial, Helvetica, sans-serif;
+  --font-body: "Inter", "Segoe UI", Arial, Helvetica, sans-serif;
 }
 
 * {
@@ -20,7 +22,14 @@
 body {
   color: var(--foreground);
   background: var(--background);
-  font-family: var(--font-geist-sans), Arial, Helvetica, sans-serif;
+  font-family: var(--font-body);
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+  letter-spacing: 0;
 }
 
 @layer utilities {
