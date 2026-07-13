@@ -3,7 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { requirePrimaryOrganization } from "@/lib/auth/require-organization";
 import { aiExtractionIsConfigured, scanDocumentVersion } from "@/lib/ai/document-scanning";
-import { isMissingColumnError } from "@/lib/document-schema-compat";
+import { isMissingColumnError, writeWithColumnFallback } from "@/lib/document-schema-compat";
 import { sendVendorInviteEmail } from "@/lib/email/vendor-emails";
 import { getSiteUrl } from "@/lib/site-url";
 import { getSupabaseAdmin } from "@/lib/supabase/admin";
@@ -108,51 +108,6 @@ function sanitizeFileName(fileName: string) {
     .slice(0, 120);
 
   return cleaned || "document";
-}
-
-function stripUnknownColumn<T extends Record<string, unknown>>(values: T, error: { message?: string }) {
-  const message = error.message ?? "";
-  const quoted = message.match(/'([a-zA-Z0-9_]+)'/);
-  const dotted = message.match(/column\s+[a-zA-Z0-9_]+\.([a-zA-Z0-9_]+)/i);
-  const bare = message.match(/column\s+([a-zA-Z0-9_]+)/i);
-  const column = quoted?.[1] ?? dotted?.[1] ?? bare?.[1];
-
-  if (!column || !(column in values)) {
-    return null;
-  }
-
-  const next = { ...values };
-  delete next[column];
-  return next;
-}
-
-async function insertWithColumnFallback(
-  query: (values: Record<string, unknown>) => PromiseLike<{ error: { message?: string; code?: string } | null }>,
-  values: Record<string, unknown>,
-) {
-  let nextValues = values;
-
-  for (let attempt = 0; attempt < 30; attempt += 1) {
-    const result = await query(nextValues);
-    if (!result.error || !isMissingColumnError(result.error)) {
-      return result;
-    }
-
-    const stripped = stripUnknownColumn(nextValues, result.error);
-    if (!stripped) {
-      return result;
-    }
-    nextValues = stripped;
-  }
-
-  return query(nextValues);
-}
-
-async function updateWithColumnFallback(
-  query: (values: Record<string, unknown>) => PromiseLike<{ error: { message?: string; code?: string } | null }>,
-  values: Record<string, unknown>,
-) {
-  return insertWithColumnFallback(query, values);
 }
 
 async function getCurrentUserId() {
@@ -954,7 +909,7 @@ export async function completeDocumentUpload(
       ai_extracted_issuing_authority: null,
     };
 
-  const documentMetadataResult = await updateWithColumnFallback(
+  const documentMetadataResult = await writeWithColumnFallback(
     (values) =>
       supabase
         .from("documents")
@@ -1161,7 +1116,7 @@ export async function reviewDocument(formData: FormData): Promise<ActionResult> 
       deficient_at: approved ? null : new Date().toISOString(),
     };
 
-  const { error: documentError } = await updateWithColumnFallback(
+  const { error: documentError } = await writeWithColumnFallback(
     (values) =>
       supabase
         .from("documents")

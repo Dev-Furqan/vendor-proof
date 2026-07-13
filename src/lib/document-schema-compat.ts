@@ -17,15 +17,80 @@ export const documentSelectWithAi =
 export const documentSelectBase =
   "id, organization_id, vendor_id, property_id, vendor_requirement_id, document_type, status, issued_at, expires_at, created_at, updated_at";
 
-export function isMissingColumnError(error: { message?: string; code?: string } | null | undefined) {
-  const message = error?.message ?? "";
+type SchemaError = {
+  message?: string;
+  code?: string;
+  details?: string;
+  hint?: string;
+};
+
+export function isMissingColumnError(error: SchemaError | null | undefined) {
+  const text = [error?.message, error?.details, error?.hint].filter(Boolean).join(" ");
   return (
     error?.code === "42703" ||
     error?.code === "PGRST204" ||
-    /column .* does not exist/i.test(message) ||
-    /could not find .* column/i.test(message) ||
-    /schema cache/i.test(message)
+    /column .* does not exist/i.test(text) ||
+    /could not find .* column/i.test(text) ||
+    /schema cache/i.test(text)
   );
+}
+
+function missingColumnName(error: SchemaError) {
+  const text = [error.message, error.details, error.hint].filter(Boolean).join(" ");
+  const patterns = [
+    /'([a-zA-Z0-9_]+)'\s+column/i,
+    /column\s+'([a-zA-Z0-9_]+)'/i,
+    /column\s+[a-zA-Z0-9_]+\.([a-zA-Z0-9_]+)/i,
+    /column\s+([a-zA-Z0-9_]+)/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match?.[1]) {
+      return match[1];
+    }
+  }
+
+  return null;
+}
+
+function stripUnknownColumn<T extends Record<string, unknown>>(values: T, error: SchemaError) {
+  const column = missingColumnName(error);
+
+  if (!column || !(column in values)) {
+    return null;
+  }
+
+  const next = { ...values };
+  delete next[column];
+  return next;
+}
+
+export async function writeWithColumnFallback<T extends { error: SchemaError | null }>(
+  query: (values: Record<string, unknown>) => PromiseLike<T>,
+  values: Record<string, unknown>,
+) {
+  let nextValues = values;
+
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const result = await query(nextValues);
+    if (!result.error || !isMissingColumnError(result.error)) {
+      return result;
+    }
+
+    const stripped = stripUnknownColumn(nextValues, result.error);
+    if (!stripped) {
+      return result;
+    }
+
+    if (Object.keys(stripped).length === 0) {
+      return { error: null } as T;
+    }
+
+    nextValues = stripped;
+  }
+
+  return query(nextValues);
 }
 
 export function withRequirementDefaults(row: VendorRequirementRecord): VendorRequirementRecord {

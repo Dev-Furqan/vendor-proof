@@ -1,5 +1,6 @@
 import { getSiteUrl } from "@/lib/site-url";
 import { getSupabaseAdmin } from "@/lib/supabase/admin";
+import { writeWithColumnFallback } from "@/lib/document-schema-compat";
 import { isValidDateString } from "@/lib/validation";
 
 const OPENROUTER_ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
@@ -326,17 +327,21 @@ async function callOpenRouter(dataUrl: string, requirement: RequirementRule) {
 
 async function markExtractionFailure(input: ScanDocumentInput, error: Error) {
   const admin = getSupabaseAdmin();
-  await admin
-    .from("documents")
-    .update({
+  await writeWithColumnFallback(
+    (values) =>
+      admin
+        .from("documents")
+        .update(values)
+        .eq("organization_id", input.organizationId)
+        .eq("id", input.documentId),
+    {
       ai_extraction_status: "manual_review",
       ai_extraction_model: modelName(),
       ai_extraction_error: error.message,
       ai_extraction_completed_at: new Date().toISOString(),
       ai_extraction_flags: ["needs_manual_review", "extraction_failed"],
-    })
-    .eq("organization_id", input.organizationId)
-    .eq("id", input.documentId);
+    },
+  );
 
   await admin.from("audit_logs").insert({
     organization_id: input.organizationId,
@@ -356,24 +361,32 @@ export async function scanDocumentVersion(input: ScanDocumentInput) {
   const admin = getSupabaseAdmin();
 
   if (!aiScanningEnabled()) {
-    await admin
-      .from("documents")
-      .update({ ai_extraction_status: "disabled" })
-      .eq("organization_id", input.organizationId)
-      .eq("id", input.documentId);
+    await writeWithColumnFallback(
+      (values) =>
+        admin
+          .from("documents")
+          .update(values)
+          .eq("organization_id", input.organizationId)
+          .eq("id", input.documentId),
+      { ai_extraction_status: "disabled" },
+    );
     return;
   }
 
-  await admin
-    .from("documents")
-    .update({
+  await writeWithColumnFallback(
+    (values) =>
+      admin
+        .from("documents")
+        .update(values)
+        .eq("organization_id", input.organizationId)
+        .eq("id", input.documentId),
+    {
       ai_extraction_status: "pending",
       ai_extraction_model: modelName(),
       ai_extraction_error: null,
       ai_extraction_flags: [],
-    })
-    .eq("organization_id", input.organizationId)
-    .eq("id", input.documentId);
+    },
+  );
 
   const [{ data: version }, { data: requirement }] = await Promise.all([
     admin
@@ -404,9 +417,14 @@ export async function scanDocumentVersion(input: ScanDocumentInput) {
       flags.includes("already_expired") ||
       flags.includes("extraction_failed");
 
-    await admin
-      .from("documents")
-      .update({
+    await writeWithColumnFallback(
+      (values) =>
+        admin
+          .from("documents")
+          .update(values)
+          .eq("organization_id", input.organizationId)
+          .eq("id", input.documentId),
+      {
         business_name: extraction.result.insured_or_business_name,
         policy_number: extraction.result.policy_or_license_number,
         issued_at: extraction.result.effective_date,
@@ -426,9 +444,8 @@ export async function scanDocumentVersion(input: ScanDocumentInput) {
         ai_extracted_effective_date: extraction.result.effective_date,
         ai_extracted_expiration_date: extraction.result.expiration_date,
         ai_extracted_issuing_authority: extraction.result.issuing_carrier_or_authority,
-      })
-      .eq("organization_id", input.organizationId)
-      .eq("id", input.documentId);
+      },
+    );
 
     if (extraction.result.expiration_date) {
       await admin

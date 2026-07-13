@@ -2,7 +2,7 @@
 
 import { revalidatePath } from "next/cache";
 import { aiExtractionIsConfigured, scanDocumentVersion } from "@/lib/ai/document-scanning";
-import { isMissingColumnError } from "@/lib/document-schema-compat";
+import { writeWithColumnFallback } from "@/lib/document-schema-compat";
 import { getSupabaseAdmin } from "@/lib/supabase/admin";
 import { isValidDateString } from "@/lib/validation";
 import { resolveVendorPortalToken } from "@/lib/vendor-portal/tokens";
@@ -36,44 +36,6 @@ function sanitizeFileName(fileName: string) {
     .slice(0, 120);
 
   return cleaned || "document";
-}
-
-function stripUnknownColumn<T extends Record<string, unknown>>(values: T, error: { message?: string }) {
-  const message = error.message ?? "";
-  const quoted = message.match(/'([a-zA-Z0-9_]+)'/);
-  const dotted = message.match(/column\s+[a-zA-Z0-9_]+\.([a-zA-Z0-9_]+)/i);
-  const bare = message.match(/column\s+([a-zA-Z0-9_]+)/i);
-  const column = quoted?.[1] ?? dotted?.[1] ?? bare?.[1];
-
-  if (!column || !(column in values)) {
-    return null;
-  }
-
-  const next = { ...values };
-  delete next[column];
-  return next;
-}
-
-async function updateWithColumnFallback(
-  query: (values: Record<string, unknown>) => PromiseLike<{ error: { message?: string; code?: string } | null }>,
-  values: Record<string, unknown>,
-) {
-  let nextValues = values;
-
-  for (let attempt = 0; attempt < 12; attempt += 1) {
-    const result = await query(nextValues);
-    if (!result.error || !isMissingColumnError(result.error)) {
-      return result;
-    }
-
-    const stripped = stripUnknownColumn(nextValues, result.error);
-    if (!stripped) {
-      return result;
-    }
-    nextValues = stripped;
-  }
-
-  return query(nextValues);
 }
 
 async function getRequirementForToken(portalToken: string, requirementId: string) {
@@ -232,7 +194,7 @@ export async function completeVendorPortalUpload(
     };
   }
 
-  const documentMetadataResult = await updateWithColumnFallback(
+  const documentMetadataResult = await writeWithColumnFallback(
     (values) =>
       admin
         .from("documents")
