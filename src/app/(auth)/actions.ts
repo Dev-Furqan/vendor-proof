@@ -5,6 +5,7 @@ import { redirect } from "next/navigation";
 import { ensureUserWorkspace } from "@/lib/auth/workspace";
 import { captureServerEvent } from "@/lib/posthog/events";
 import { createClient } from "@/lib/supabase/server";
+import { cleanText, isValidEmail } from "@/lib/validation";
 
 function getSiteUrl() {
   const configuredUrl =
@@ -39,12 +40,20 @@ function authError(path: string, message: string): never {
 export async function signUpWithPassword(formData: FormData) {
   const email = getString(formData, "email").toLowerCase();
   const password = getString(formData, "password");
-  const fullName = getString(formData, "fullName");
+  const fullName = cleanText(getString(formData, "fullName"), 120);
   const supabase = createClient();
   const siteUrl = getSiteUrl();
 
   if (!email || !password) {
     authError("/signup", "Email and password are required.");
+  }
+
+  if (!isValidEmail(email)) {
+    authError("/signup", "Enter a valid email address.");
+  }
+
+  if (password.length < 8) {
+    authError("/signup", "Password must be at least 8 characters.");
   }
 
   const { data, error } = await supabase.auth.signUp({
@@ -106,6 +115,10 @@ export async function signInWithPassword(formData: FormData) {
 
   if (!email || !password) {
     authError("/login", "Email and password are required.");
+  }
+
+  if (!isValidEmail(email)) {
+    authError("/login", "Enter a valid email address.");
   }
 
   const { data, error } = await supabase.auth.signInWithPassword({
@@ -207,7 +220,7 @@ async function getCurrentOrganizationId() {
 }
 
 export async function saveOrganizationName(formData: FormData) {
-  const name = getString(formData, "organizationName");
+  const name = cleanText(getString(formData, "organizationName"), 140);
   const organizationId = await getCurrentOrganizationId();
   const supabase = createClient();
 
@@ -228,11 +241,11 @@ export async function saveOrganizationName(formData: FormData) {
 }
 
 export async function addFirstProperty(formData: FormData) {
-  const name = getString(formData, "propertyName");
-  const addressLine1 = getString(formData, "addressLine1");
-  const city = getString(formData, "city");
-  const state = getString(formData, "state");
-  const postalCode = getString(formData, "postalCode");
+  const name = cleanText(getString(formData, "propertyName"), 120);
+  const addressLine1 = cleanText(getString(formData, "addressLine1"), 180);
+  const city = cleanText(getString(formData, "city"), 80);
+  const state = cleanText(getString(formData, "state"), 40);
+  const postalCode = cleanText(getString(formData, "postalCode"), 20);
   const organizationId = await getCurrentOrganizationId();
   const supabase = createClient();
 

@@ -10,6 +10,8 @@ export function initPostHog() {
   if (!isInitialized && typeof window !== "undefined" && key) {
     posthog.init(key, {
       api_host: "https://us.i.posthog.com",
+      advanced_disable_decide: true,
+      capture_pageview: false,
     });
     isInitialized = true;
   }

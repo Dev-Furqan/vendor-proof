@@ -20,7 +20,11 @@ import {
   secondaryButton,
 } from "@/components/dashboard/form-controls";
 import { Modal } from "@/components/dashboard/modal";
-import type { RequirementTemplateRecord, VendorRecord } from "@/components/dashboard/types";
+import type {
+  PropertyRecord,
+  RequirementTemplateRecord,
+  VendorRecord,
+} from "@/components/dashboard/types";
 import { posthog } from "@/lib/posthog/client";
 import { useToast } from "@/components/ui/toast";
 
@@ -330,10 +334,12 @@ function CsvImportFlow({ onImported }: { onImported: () => void }) {
 export function VendorsClient({
   vendors,
   templates,
+  properties,
   requirements,
 }: {
   vendors: VendorRecord[];
   templates: RequirementTemplateRecord[];
+  properties: PropertyRecord[];
   requirements: RequirementSummary[];
 }) {
   const router = useRouter();
@@ -584,6 +590,16 @@ export function VendorsClient({
                 {templates.map((template) => (
                   <option key={template.id} value={template.id}>
                     {template.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Property">
+              <select name="propertyId" className={inputClass}>
+                <option value="">Unassigned / portfolio-wide</option>
+                {properties.map((property) => (
+                  <option key={property.id} value={property.id}>
+                    {property.name}
                   </option>
                 ))}
               </select>

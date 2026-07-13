@@ -1,4 +1,5 @@
 import Link from "next/link";
+import type { Metadata } from "next";
 import {
   AuthNotice,
   AuthShell,
@@ -7,6 +8,11 @@ import {
   secondaryButtonClass,
 } from "@/components/auth/auth-shell";
 import { signInWithGoogle, signUpWithPassword } from "../actions";
+
+export const metadata: Metadata = {
+  title: "Start free trial | VendorProof",
+  description: "Create a VendorProof workspace for vendor compliance tracking.",
+};
 
 export default function SignupPage({
   searchParams,

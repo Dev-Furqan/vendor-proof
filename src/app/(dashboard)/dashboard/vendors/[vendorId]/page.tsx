@@ -1,4 +1,5 @@
 import { notFound } from "next/navigation";
+import type { Metadata } from "next";
 import { VendorChecklistClient } from "@/components/dashboard/documents/vendor-checklist-client";
 import type {
   DocumentRecord,
@@ -9,9 +10,24 @@ import type {
   VendorRequirementRecord,
 } from "@/components/dashboard/types";
 import { attachDocumentsToRequirements } from "@/lib/compliance/status";
+import {
+  documentSelectBase,
+  documentSelectWithAi,
+  isMissingColumnError,
+  requirementSelectBase,
+  requirementSelectWithRules,
+  type SchemaCompatResult,
+  withDocumentDefaults,
+  withRequirementDefaults,
+} from "@/lib/document-schema-compat";
 import { createSignedDocumentUrl } from "@/lib/documents";
 import { requirePrimaryOrganization } from "@/lib/auth/require-organization";
 import { createClient } from "@/lib/supabase/server";
+
+export const metadata: Metadata = {
+  title: "Vendor Checklist | VendorProof",
+  description: "Review uploads, approvals, and communications for a vendor.",
+};
 
 export default async function VendorDetailPage({
   params,
@@ -21,27 +37,31 @@ export default async function VendorDetailPage({
   const organization = await requirePrimaryOrganization();
   const supabase = createClient();
 
-  const { data: vendor } = await supabase
+  const { data: vendor, error: vendorError } = await supabase
     .from("vendors")
     .select("id, name, email, phone, trade, category, status, default_requirement_template_id, created_at")
     .eq("organization_id", organization.id)
     .eq("id", params.vendorId)
     .maybeSingle();
 
+  if (vendorError) {
+    throw new Error(vendorError.message);
+  }
+
   if (!vendor) {
     notFound();
   }
 
-  const [requirementsResult, documentsResult, communicationsResult] = await Promise.all([
+  const [initialRequirementsResult, initialDocumentsResult, communicationsResult] = await Promise.all([
     supabase
       .from("vendor_requirements")
-      .select("id, organization_id, vendor_id, property_id, requirement_template_id, name, document_type, required, expires_required, status, due_date, expires_at, created_at, updated_at")
+      .select(requirementSelectWithRules)
       .eq("organization_id", organization.id)
       .eq("vendor_id", params.vendorId)
       .order("created_at", { ascending: true }),
     supabase
       .from("documents")
-      .select("id, organization_id, vendor_id, property_id, vendor_requirement_id, document_type, status, issued_at, expires_at, created_at, updated_at")
+      .select(documentSelectWithAi)
       .eq("organization_id", organization.id)
       .eq("vendor_id", params.vendorId),
     supabase
@@ -52,8 +72,34 @@ export default async function VendorDetailPage({
       .order("created_at", { ascending: false })
       .limit(25),
   ]);
+  let requirementsResult = initialRequirementsResult as SchemaCompatResult;
+  let documentsResult = initialDocumentsResult as SchemaCompatResult;
 
-  const documents = (documentsResult.data ?? []) as DocumentRecord[];
+  if (isMissingColumnError(requirementsResult.error)) {
+    requirementsResult = await supabase
+      .from("vendor_requirements")
+      .select(requirementSelectBase)
+      .eq("organization_id", organization.id)
+      .eq("vendor_id", params.vendorId)
+      .order("created_at", { ascending: true });
+  }
+
+  if (isMissingColumnError(documentsResult.error)) {
+    documentsResult = await supabase
+      .from("documents")
+      .select(documentSelectBase)
+      .eq("organization_id", organization.id)
+      .eq("vendor_id", params.vendorId);
+  }
+
+  const queryError =
+    requirementsResult.error ?? documentsResult.error ?? communicationsResult.error;
+
+  if (queryError) {
+    throw new Error(queryError.message);
+  }
+
+  const documents = ((documentsResult.data ?? []) as DocumentRecord[]).map(withDocumentDefaults);
   const documentIds = documents.map((document) => document.id);
 
   const [versionsResult, reviewsResult] =
@@ -70,7 +116,13 @@ export default async function VendorDetailPage({
             .eq("organization_id", organization.id)
             .in("document_id", documentIds),
         ])
-      : [{ data: [] }, { data: [] }];
+      : [{ data: [], error: null }, { data: [], error: null }];
+
+  const documentQueryError = versionsResult.error ?? reviewsResult.error;
+
+  if (documentQueryError) {
+    throw new Error(documentQueryError.message);
+  }
 
   const versionsWithUrls = await Promise.all(
     ((versionsResult.data ?? []) as DocumentVersionRecord[]).map(async (version) => ({
@@ -80,7 +132,9 @@ export default async function VendorDetailPage({
   );
 
   const requirements = attachDocumentsToRequirements({
-    requirements: (requirementsResult.data ?? []) as VendorRequirementRecord[],
+    requirements: ((requirementsResult.data ?? []) as VendorRequirementRecord[]).map(
+      withRequirementDefaults,
+    ),
     documents,
     versions: versionsWithUrls,
     reviews: (reviewsResult.data ?? []) as DocumentReviewRecord[],

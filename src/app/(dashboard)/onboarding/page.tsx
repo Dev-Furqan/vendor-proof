@@ -1,4 +1,5 @@
 import { redirect } from "next/navigation";
+import type { Metadata } from "next";
 import {
   AuthNotice,
   TextInput,
@@ -7,6 +8,11 @@ import {
 } from "@/components/auth/auth-shell";
 import { getPrimaryOrganization } from "@/lib/auth/organization";
 import { addFirstProperty, saveOrganizationName, signOut } from "../../(auth)/actions";
+
+export const metadata: Metadata = {
+  title: "Onboarding | VendorProof",
+  description: "Set up your VendorProof organization and first property.",
+};
 
 export default async function OnboardingPage({
   searchParams,

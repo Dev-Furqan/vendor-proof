@@ -1,14 +1,15 @@
 "use client";
 
 import Link from "next/link";
-import { Download, ExternalLink, FileUp, MessageSquareWarning, Send } from "lucide-react";
+import { AlertTriangle, Download, ExternalLink, FileUp, MessageSquareWarning, Send, Sparkles } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useMemo, useState, useTransition } from "react";
+import { useEffect, useMemo, useState, useTransition } from "react";
 import {
   completeDocumentUpload,
   createSignedDocumentUpload,
   inviteVendorToPortal,
   reviewDocument,
+  scanUploadedDocument,
 } from "@/app/(dashboard)/dashboard/actions";
 import { Field, inputClass, primaryButton, secondaryButton, textareaClass } from "@/components/dashboard/form-controls";
 import { StatusBadge } from "@/components/dashboard/documents/status-badge";
@@ -18,21 +19,36 @@ import type {
   VendorRecord,
   VendorRequirementRecord,
 } from "@/components/dashboard/types";
+import { formatDate } from "@/lib/format";
 import { posthog } from "@/lib/posthog/client";
 import { getRequirementStatus, daysUntil } from "@/lib/compliance/status";
 import { createClient } from "@/lib/supabase/client";
 import { useToast } from "@/components/ui/toast";
 
-function formatDate(date: string | null | undefined) {
-  if (!date) {
-    return "—";
-  }
+const maxUploadBytes = 26_214_400;
+const allowedMimePrefixes = ["image/"];
+const allowedMimeTypes = [
+  "application/pdf",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+];
 
-  return new Date(date).toLocaleDateString();
+function isAllowedFile(file: File) {
+  return (
+    allowedMimeTypes.includes(file.type) ||
+    allowedMimePrefixes.some((prefix) => file.type.startsWith(prefix))
+  );
 }
 
 function documentStatus(requirement: VendorRequirementRecord): ComplianceStatus {
   return getRequirementStatus(requirement);
+}
+
+function flagLabel(flag: string) {
+  return flag
+    .replace(/^missing_/, "missing ")
+    .replace(/_/g, " ")
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
 function UploadControl({
@@ -54,6 +70,18 @@ function UploadControl({
     if (!file) {
       setError("Choose a file to upload.");
       toast.error("Choose a file to upload");
+      return;
+    }
+
+    if (!isAllowedFile(file)) {
+      setError("Upload a PDF, Word document, or image file.");
+      toast.error("Unsupported file type");
+      return;
+    }
+
+    if (file.size > maxUploadBytes) {
+      setError("Files must be 25 MB or smaller.");
+      toast.error("File is too large");
       return;
     }
 
@@ -105,6 +133,18 @@ function UploadControl({
         requirement_id: requirement.id,
       });
       setFile(null);
+      if (
+        completed.aiExtractionConfigured &&
+        completed.documentId &&
+        completed.documentVersionId &&
+        completed.requirementId
+      ) {
+        const scanForm = new FormData();
+        scanForm.set("documentId", completed.documentId);
+        scanForm.set("documentVersionId", completed.documentVersionId);
+        scanForm.set("requirementId", completed.requirementId);
+        void scanUploadedDocument(scanForm).then(() => router.refresh());
+      }
       router.refresh();
     });
   }
@@ -151,6 +191,42 @@ function ReviewForm({
   const [isPending, startTransition] = useTransition();
   const document = requirement.document;
   const version = document?.latestVersion;
+  const [businessName, setBusinessName] = useState(
+    document?.business_name ?? document?.ai_extracted_business_name ?? "",
+  );
+  const [policyNumber, setPolicyNumber] = useState(
+    document?.policy_number ?? document?.ai_extracted_policy_number ?? "",
+  );
+  const [effectiveDate, setEffectiveDate] = useState(
+    document?.issued_at ?? document?.ai_extracted_effective_date ?? "",
+  );
+  const [expirationDate, setExpirationDate] = useState(
+    document?.expires_at ?? document?.ai_extracted_expiration_date ?? "",
+  );
+  const [issuingAuthority, setIssuingAuthority] = useState(
+    document?.issuing_authority ?? document?.ai_extracted_issuing_authority ?? "",
+  );
+
+  useEffect(() => {
+    setBusinessName(document?.business_name ?? document?.ai_extracted_business_name ?? "");
+    setPolicyNumber(document?.policy_number ?? document?.ai_extracted_policy_number ?? "");
+    setEffectiveDate(document?.issued_at ?? document?.ai_extracted_effective_date ?? "");
+    setExpirationDate(document?.expires_at ?? document?.ai_extracted_expiration_date ?? "");
+    setIssuingAuthority(
+      document?.issuing_authority ?? document?.ai_extracted_issuing_authority ?? "",
+    );
+  }, [
+    document?.ai_extracted_business_name,
+    document?.ai_extracted_effective_date,
+    document?.ai_extracted_expiration_date,
+    document?.ai_extracted_issuing_authority,
+    document?.ai_extracted_policy_number,
+    document?.business_name,
+    document?.expires_at,
+    document?.issued_at,
+    document?.issuing_authority,
+    document?.policy_number,
+  ]);
 
   if (!document || !version || document.status !== "pending_review") {
     return null;
@@ -169,6 +245,11 @@ function ReviewForm({
       formData.set("documentVersionId", reviewVersion.id);
       formData.set("decision", decision);
       formData.set("note", note);
+      formData.set("confirmedBusinessName", businessName);
+      formData.set("confirmedPolicyNumber", policyNumber);
+      formData.set("confirmedEffectiveDate", effectiveDate);
+      formData.set("confirmedExpirationDate", expirationDate);
+      formData.set("confirmedIssuingAuthority", issuingAuthority);
 
       const result = await reviewDocument(formData);
 
@@ -192,6 +273,87 @@ function ReviewForm({
 
   return (
     <div className="mt-4 rounded-md border border-white/10 bg-white/[0.025] p-3">
+      <div className="mb-4 rounded-md border border-sky-300/20 bg-sky-400/10 p-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <Sparkles size={15} className="text-sky-100" />
+          <p className="text-sm font-medium text-white">AI-extracted, please confirm</p>
+          <span className="rounded-full border border-white/10 bg-white/[0.06] px-2 py-0.5 text-xs text-muted">
+            {document.ai_extraction_status === "pending"
+              ? "Scanning"
+              : document.ai_extraction_status === "manual_review"
+                ? "Needs manual review"
+                : document.ai_extraction_status === "disabled"
+                  ? "Disabled"
+                  : document.ai_extraction_status === "failed"
+                    ? "Failed"
+                    : "Ready"}
+          </span>
+          {document.ai_extraction_confidence !== null ? (
+            <span className="rounded-full border border-white/10 bg-white/[0.06] px-2 py-0.5 text-xs text-muted">
+              {Math.round(document.ai_extraction_confidence * 100)}% confidence
+            </span>
+          ) : null}
+        </div>
+
+        {document.ai_extraction_error ? (
+          <p className="mt-2 text-sm text-amber-100">{document.ai_extraction_error}</p>
+        ) : null}
+
+        {document.ai_extraction_flags?.length ? (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {document.ai_extraction_flags.map((flag) => (
+              <span
+                key={flag}
+                className="inline-flex items-center gap-1 rounded-full border border-amber-300/25 bg-amber-300/10 px-2 py-1 text-xs text-amber-100"
+              >
+                <AlertTriangle size={12} />
+                {flagLabel(flag)}
+              </span>
+            ))}
+          </div>
+        ) : null}
+
+        <div className="mt-3 grid gap-3 md:grid-cols-2">
+          <Field label="Business or insured name">
+            <input
+              value={businessName}
+              onChange={(event) => setBusinessName(event.target.value)}
+              className={inputClass}
+            />
+          </Field>
+          <Field label="Policy or license number">
+            <input
+              value={policyNumber}
+              onChange={(event) => setPolicyNumber(event.target.value)}
+              className={inputClass}
+            />
+          </Field>
+          <Field label="Effective date">
+            <input
+              type="date"
+              value={effectiveDate}
+              onChange={(event) => setEffectiveDate(event.target.value)}
+              className={inputClass}
+            />
+          </Field>
+          <Field label="Expiration date">
+            <input
+              type="date"
+              value={expirationDate}
+              onChange={(event) => setExpirationDate(event.target.value)}
+              className={inputClass}
+            />
+          </Field>
+          <Field label="Issuing carrier or authority">
+            <input
+              value={issuingAuthority}
+              onChange={(event) => setIssuingAuthority(event.target.value)}
+              className={inputClass}
+            />
+          </Field>
+        </div>
+      </div>
+
       <Field label="Review note">
         <textarea
           value={note}

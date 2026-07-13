@@ -2,16 +2,23 @@
 
 import { revalidatePath } from "next/cache";
 import { requirePrimaryOrganization } from "@/lib/auth/require-organization";
+import { aiExtractionIsConfigured, scanDocumentVersion } from "@/lib/ai/document-scanning";
+import { isMissingColumnError } from "@/lib/document-schema-compat";
 import { sendVendorInviteEmail } from "@/lib/email/vendor-emails";
 import { getSiteUrl } from "@/lib/site-url";
 import { getSupabaseAdmin } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
+import { cleanText, isValidDateString, isValidEmail } from "@/lib/validation";
 import { createVendorPortalInvite } from "@/lib/vendor-portal/tokens";
 import type { TemplateRequirement } from "@/components/dashboard/types";
 
 type ActionResult = {
   ok: boolean;
   error?: string;
+  documentId?: string;
+  documentVersionId?: string;
+  requirementId?: string;
+  aiExtractionConfigured?: boolean;
 };
 
 function value(formData: FormData, key: string) {
@@ -35,6 +42,26 @@ function normalizeDocumentType(documentType: string) {
   return ["coi", "license", "w9", "other"].includes(normalized)
     ? normalized
     : "other";
+}
+
+function correctionDiff(
+  extracted: Record<string, string | null | undefined>,
+  confirmed: Record<string, string | null | undefined>,
+) {
+  return Object.entries(confirmed).reduce<Record<string, { extracted: string | null; confirmed: string | null }>>(
+    (diff, [key, confirmedValue]) => {
+      const extractedValue = extracted[key] ?? null;
+      const normalizedConfirmed = confirmedValue || null;
+      if ((extractedValue || null) !== normalizedConfirmed) {
+        diff[key] = {
+          extracted: extractedValue || null,
+          confirmed: normalizedConfirmed,
+        };
+      }
+      return diff;
+    },
+    {},
+  );
 }
 
 function parseRequirements(formData: FormData) {
@@ -83,6 +110,51 @@ function sanitizeFileName(fileName: string) {
   return cleaned || "document";
 }
 
+function stripUnknownColumn<T extends Record<string, unknown>>(values: T, error: { message?: string }) {
+  const message = error.message ?? "";
+  const quoted = message.match(/'([a-zA-Z0-9_]+)'/);
+  const dotted = message.match(/column\s+[a-zA-Z0-9_]+\.([a-zA-Z0-9_]+)/i);
+  const bare = message.match(/column\s+([a-zA-Z0-9_]+)/i);
+  const column = quoted?.[1] ?? dotted?.[1] ?? bare?.[1];
+
+  if (!column || !(column in values)) {
+    return null;
+  }
+
+  const next = { ...values };
+  delete next[column];
+  return next;
+}
+
+async function insertWithColumnFallback(
+  query: (values: Record<string, unknown>) => PromiseLike<{ error: { message?: string; code?: string } | null }>,
+  values: Record<string, unknown>,
+) {
+  let nextValues = values;
+
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const result = await query(nextValues);
+    if (!result.error || !isMissingColumnError(result.error)) {
+      return result;
+    }
+
+    const stripped = stripUnknownColumn(nextValues, result.error);
+    if (!stripped) {
+      return result;
+    }
+    nextValues = stripped;
+  }
+
+  return query(nextValues);
+}
+
+async function updateWithColumnFallback(
+  query: (values: Record<string, unknown>) => PromiseLike<{ error: { message?: string; code?: string } | null }>,
+  values: Record<string, unknown>,
+) {
+  return insertWithColumnFallback(query, values);
+}
+
 async function getCurrentUserId() {
   const supabase = createClient();
   const {
@@ -94,18 +166,37 @@ async function getCurrentUserId() {
 
 export async function createProperty(formData: FormData): Promise<ActionResult> {
   const organization = await requirePrimaryOrganization();
-  const name = value(formData, "name");
+  const name = cleanText(value(formData, "name"), 120);
+  const unitCount = numberValue(formData, "unitCount");
 
   if (!name) {
     return { ok: false, error: "Property name is required." };
   }
 
+  if (unitCount < 0) {
+    return { ok: false, error: "Unit count cannot be negative." };
+  }
+
   const supabase = createClient();
+  const { count, error: duplicateError } = await supabase
+    .from("properties")
+    .select("id", { count: "exact", head: true })
+    .eq("organization_id", organization.id)
+    .ilike("name", name);
+
+  if (duplicateError) {
+    return { ok: false, error: duplicateError.message };
+  }
+
+  if ((count ?? 0) > 0) {
+    return { ok: false, error: "A property with this name already exists." };
+  }
+
   const { error } = await supabase.from("properties").insert({
     organization_id: organization.id,
     name,
     address_line1: nullableValue(formData, "address"),
-    unit_count: numberValue(formData, "unitCount"),
+    unit_count: unitCount,
     property_type: value(formData, "propertyType") || "multifamily",
   });
 
@@ -120,19 +211,39 @@ export async function createProperty(formData: FormData): Promise<ActionResult> 
 export async function updateProperty(formData: FormData): Promise<ActionResult> {
   const organization = await requirePrimaryOrganization();
   const id = value(formData, "id");
-  const name = value(formData, "name");
+  const name = cleanText(value(formData, "name"), 120);
+  const unitCount = numberValue(formData, "unitCount");
 
   if (!id || !name) {
     return { ok: false, error: "Property id and name are required." };
   }
 
+  if (unitCount < 0) {
+    return { ok: false, error: "Unit count cannot be negative." };
+  }
+
   const supabase = createClient();
+  const { count, error: duplicateError } = await supabase
+    .from("properties")
+    .select("id", { count: "exact", head: true })
+    .eq("organization_id", organization.id)
+    .ilike("name", name)
+    .neq("id", id);
+
+  if (duplicateError) {
+    return { ok: false, error: duplicateError.message };
+  }
+
+  if ((count ?? 0) > 0) {
+    return { ok: false, error: "Another property already uses this name." };
+  }
+
   const { error } = await supabase
     .from("properties")
     .update({
       name,
       address_line1: nullableValue(formData, "address"),
-      unit_count: numberValue(formData, "unitCount"),
+      unit_count: unitCount,
       property_type: value(formData, "propertyType") || "multifamily",
     })
     .eq("organization_id", organization.id)
@@ -165,17 +276,36 @@ export async function deleteProperty(id: string): Promise<ActionResult> {
 
 export async function createVendor(formData: FormData): Promise<ActionResult> {
   const organization = await requirePrimaryOrganization();
-  const name = value(formData, "name");
+  const name = cleanText(value(formData, "name"), 140);
+  const email = value(formData, "email").toLowerCase();
 
   if (!name) {
     return { ok: false, error: "Vendor name is required." };
   }
 
+  if (email && !isValidEmail(email)) {
+    return { ok: false, error: "Enter a valid vendor email address." };
+  }
+
   const supabase = createClient();
+  const { count, error: duplicateError } = await supabase
+    .from("vendors")
+    .select("id", { count: "exact", head: true })
+    .eq("organization_id", organization.id)
+    .ilike("name", name);
+
+  if (duplicateError) {
+    return { ok: false, error: duplicateError.message };
+  }
+
+  if ((count ?? 0) > 0) {
+    return { ok: false, error: "A vendor with this name already exists." };
+  }
+
   const { error } = await supabase.from("vendors").insert({
     organization_id: organization.id,
     name,
-    email: nullableValue(formData, "email"),
+    email: email || null,
     phone: nullableValue(formData, "phone"),
     trade: nullableValue(formData, "category"),
     category: nullableValue(formData, "category"),
@@ -192,18 +322,38 @@ export async function createVendor(formData: FormData): Promise<ActionResult> {
 export async function updateVendor(formData: FormData): Promise<ActionResult> {
   const organization = await requirePrimaryOrganization();
   const id = value(formData, "id");
-  const name = value(formData, "name");
+  const name = cleanText(value(formData, "name"), 140);
+  const email = value(formData, "email").toLowerCase();
 
   if (!id || !name) {
     return { ok: false, error: "Vendor id and name are required." };
   }
 
+  if (email && !isValidEmail(email)) {
+    return { ok: false, error: "Enter a valid vendor email address." };
+  }
+
   const supabase = createClient();
+  const { count, error: duplicateError } = await supabase
+    .from("vendors")
+    .select("id", { count: "exact", head: true })
+    .eq("organization_id", organization.id)
+    .ilike("name", name)
+    .neq("id", id);
+
+  if (duplicateError) {
+    return { ok: false, error: duplicateError.message };
+  }
+
+  if ((count ?? 0) > 0) {
+    return { ok: false, error: "Another vendor already uses this name." };
+  }
+
   const { error } = await supabase
     .from("vendors")
     .update({
       name,
-      email: nullableValue(formData, "email"),
+      email: email || null,
       phone: nullableValue(formData, "phone"),
       trade: nullableValue(formData, "category"),
       category: nullableValue(formData, "category"),
@@ -243,20 +393,46 @@ export async function importVendorsFromCsv(
   const cleanRows = rows
     .map((row) => ({
       organization_id: organization.id,
-      name: row.name?.trim(),
-      email: row.email?.trim() || null,
+      name: cleanText(row.name ?? "", 140),
+      email: row.email?.trim().toLowerCase() || null,
       phone: row.phone?.trim() || null,
       trade: row.category?.trim() || null,
       category: row.category?.trim() || null,
     }))
-    .filter((row) => row.name);
+    .filter((row) => row.name && isValidEmail(row.email))
+    .filter((row, index, allRows) => {
+      const name = row.name.toLowerCase();
+      return allRows.findIndex((candidate) => candidate.name.toLowerCase() === name) === index;
+    });
 
   if (cleanRows.length === 0) {
     return { ok: false, error: "No valid vendor rows were found." };
   }
 
   const supabase = createClient();
-  const { error } = await supabase.from("vendors").insert(cleanRows);
+  const { data: existingRows, error: existingError } = await supabase
+    .from("vendors")
+    .select("name")
+    .eq("organization_id", organization.id);
+
+  if (existingError) {
+    return { ok: false, error: existingError.message };
+  }
+
+  const existingNames = new Set(
+    ((existingRows ?? []) as Array<{ name: string | null }>).map((row) =>
+      (row.name ?? "").toLowerCase(),
+    ),
+  );
+  const rowsToInsert = cleanRows.filter(
+    (row) => !existingNames.has(row.name.toLowerCase()),
+  );
+
+  if (rowsToInsert.length === 0) {
+    return { ok: false, error: "All rows are duplicates of existing vendors." };
+  }
+
+  const { error } = await supabase.from("vendors").insert(rowsToInsert);
 
   if (error) {
     return { ok: false, error: error.message };
@@ -270,7 +446,7 @@ export async function createRequirementTemplate(
   formData: FormData,
 ): Promise<ActionResult> {
   const organization = await requirePrimaryOrganization();
-  const name = value(formData, "name");
+  const name = cleanText(value(formData, "name"), 120);
   const requirements = parseRequirements(formData);
 
   if (!name) {
@@ -281,8 +457,27 @@ export async function createRequirementTemplate(
     return { ok: false, error: "Add at least one required document." };
   }
 
+  const labels = requirements.map((item) => item.label.toLowerCase());
+  if (new Set(labels).size !== labels.length) {
+    return { ok: false, error: "Requirement labels must be unique." };
+  }
+
   const primaryRequirement = requirements[0];
   const supabase = createClient();
+  const { count, error: duplicateError } = await supabase
+    .from("requirement_templates")
+    .select("id", { count: "exact", head: true })
+    .eq("organization_id", organization.id)
+    .ilike("name", name);
+
+  if (duplicateError) {
+    return { ok: false, error: duplicateError.message };
+  }
+
+  if ((count ?? 0) > 0) {
+    return { ok: false, error: "A template with this name already exists." };
+  }
+
   const { error } = await supabase.from("requirement_templates").insert({
     organization_id: organization.id,
     name,
@@ -308,7 +503,7 @@ export async function updateRequirementTemplate(
 ): Promise<ActionResult> {
   const organization = await requirePrimaryOrganization();
   const id = value(formData, "id");
-  const name = value(formData, "name");
+  const name = cleanText(value(formData, "name"), 120);
   const requirements = parseRequirements(formData);
 
   if (!id || !name) {
@@ -319,8 +514,28 @@ export async function updateRequirementTemplate(
     return { ok: false, error: "Add at least one required document." };
   }
 
+  const labels = requirements.map((item) => item.label.toLowerCase());
+  if (new Set(labels).size !== labels.length) {
+    return { ok: false, error: "Requirement labels must be unique." };
+  }
+
   const primaryRequirement = requirements[0];
   const supabase = createClient();
+  const { count, error: duplicateError } = await supabase
+    .from("requirement_templates")
+    .select("id", { count: "exact", head: true })
+    .eq("organization_id", organization.id)
+    .ilike("name", name)
+    .neq("id", id);
+
+  if (duplicateError) {
+    return { ok: false, error: duplicateError.message };
+  }
+
+  if ((count ?? 0) > 0) {
+    return { ok: false, error: "Another template already uses this name." };
+  }
+
   const { error } = await supabase
     .from("requirement_templates")
     .update({
@@ -367,6 +582,7 @@ export async function assignRequirementTemplate(
   const organization = await requirePrimaryOrganization();
   const vendorId = value(formData, "vendorId");
   const templateId = value(formData, "templateId");
+  const propertyId = nullableValue(formData, "propertyId");
 
   if (!vendorId || !templateId) {
     return { ok: false, error: "Vendor and template are required." };
@@ -395,6 +611,22 @@ export async function assignRequirementTemplate(
     return { ok: false, error: "Template has no document requirements." };
   }
 
+  if (propertyId) {
+    const { data: property, error: propertyError } = await supabase
+      .from("properties")
+      .select("id")
+      .eq("organization_id", organization.id)
+      .eq("id", propertyId)
+      .maybeSingle();
+
+    if (propertyError || !property) {
+      return {
+        ok: false,
+        error: propertyError?.message ?? "Property could not be found.",
+      };
+    }
+  }
+
   const { error: vendorError } = await supabase
     .from("vendors")
     .update({ default_requirement_template_id: templateId })
@@ -405,19 +637,25 @@ export async function assignRequirementTemplate(
     return { ok: false, error: vendorError.message };
   }
 
-  await supabase
+  const { error: deleteRequirementsError } = await supabase
     .from("vendor_requirements")
     .delete()
     .eq("organization_id", organization.id)
     .eq("vendor_id", vendorId);
 
+  if (deleteRequirementsError) {
+    return { ok: false, error: deleteRequirementsError.message };
+  }
+
   const rows = requirements.map((requirement) => ({
     organization_id: organization.id,
     vendor_id: vendorId,
+    property_id: propertyId,
     requirement_template_id: templateId,
     name: requirement.label,
     document_type: normalizeDocumentType(requirement.documentType),
     expires_required: requirement.expiresRequired,
+    expiration_rule: requirement.expirationRule || "none",
     status: "missing",
   }));
 
@@ -426,7 +664,22 @@ export async function assignRequirementTemplate(
     .insert(rows);
 
   if (requirementError) {
-    return { ok: false, error: requirementError.message };
+    if (!isMissingColumnError(requirementError)) {
+      return { ok: false, error: requirementError.message };
+    }
+
+    const fallbackRows = rows.map((row) => {
+      const fallbackRow: Record<string, unknown> = { ...row };
+      delete fallbackRow.expiration_rule;
+      return fallbackRow;
+    });
+    const { error: fallbackError } = await supabase
+      .from("vendor_requirements")
+      .insert(fallbackRows);
+
+    if (fallbackError) {
+      return { ok: false, error: fallbackError.message };
+    }
   }
 
   refreshDashboardPaths();
@@ -565,19 +818,35 @@ export async function completeDocumentUpload(
   }
 
   const supabase = createClient();
-  const { data: requirement, error: requirementError } = await supabase
+  let requirementResult = await supabase
     .from("vendor_requirements")
-    .select("id, vendor_id, property_id, document_type")
+    .select("id, vendor_id, property_id, document_type, expires_required, expiration_rule")
     .eq("organization_id", organization.id)
     .eq("id", requirementId)
     .eq("vendor_id", vendorId)
     .maybeSingle();
+
+  if (isMissingColumnError(requirementResult.error)) {
+    requirementResult = await supabase
+      .from("vendor_requirements")
+      .select("id, vendor_id, property_id, document_type, expires_required")
+      .eq("organization_id", organization.id)
+      .eq("id", requirementId)
+      .eq("vendor_id", vendorId)
+      .maybeSingle();
+  }
+
+  const { data: requirement, error: requirementError } = requirementResult;
 
   if (requirementError || !requirement) {
     return {
       ok: false,
       error: requirementError?.message ?? "Requirement could not be found.",
     };
+  }
+
+  if (expiresAt && !isValidDateString(expiresAt)) {
+    return { ok: false, error: "Enter a valid expiration date." };
   }
 
   const { data: existingDocument } = await supabase
@@ -659,15 +928,45 @@ export async function completeDocumentUpload(
     };
   }
 
-  await supabase
-    .from("documents")
-    .update({
+  const documentMetadataUpdate = {
       latest_document_version_id: version.id,
       status: "pending_review",
+      business_name: null,
+      policy_number: null,
+      issued_at: null,
       expires_at: expiresAt,
-    })
-    .eq("organization_id", organization.id)
-    .eq("id", documentId);
+      issuing_authority: null,
+      ai_extraction_status: aiExtractionIsConfigured() ? "pending" : "disabled",
+      ai_extraction_raw: null,
+      ai_extraction_confidence: null,
+      ai_extraction_flags: [],
+      ai_extraction_usage: null,
+      ai_extraction_error: null,
+      ai_extraction_completed_at: null,
+      ai_extraction_confirmed_at: null,
+      ai_extraction_confirmed_by: null,
+      ai_extraction_corrected_fields: null,
+      ai_extracted_document_type: null,
+      ai_extracted_business_name: null,
+      ai_extracted_policy_number: null,
+      ai_extracted_effective_date: null,
+      ai_extracted_expiration_date: null,
+      ai_extracted_issuing_authority: null,
+    };
+
+  const documentMetadataResult = await updateWithColumnFallback(
+    (values) =>
+      supabase
+        .from("documents")
+        .update(values)
+        .eq("organization_id", organization.id)
+        .eq("id", documentId),
+    documentMetadataUpdate,
+  );
+
+  if (documentMetadataResult.error) {
+    return { ok: false, error: documentMetadataResult.error.message };
+  }
 
   const { error: requirementUpdateError } = await supabase
     .from("vendor_requirements")
@@ -698,6 +997,48 @@ export async function completeDocumentUpload(
   });
 
   refreshVendorPaths(vendorId);
+  return {
+    ok: true,
+    documentId,
+    documentVersionId: version.id as string,
+    requirementId,
+    aiExtractionConfigured: aiExtractionIsConfigured(),
+  };
+}
+
+export async function scanUploadedDocument(formData: FormData): Promise<ActionResult> {
+  const organization = await requirePrimaryOrganization();
+  const userId = await getCurrentUserId();
+  const documentId = value(formData, "documentId");
+  const documentVersionId = value(formData, "documentVersionId");
+  const requirementId = value(formData, "requirementId");
+
+  if (!documentId || !documentVersionId || !requirementId) {
+    return { ok: false, error: "Document extraction metadata is missing." };
+  }
+
+  const supabase = createClient();
+  const { data: document, error } = await supabase
+    .from("documents")
+    .select("id, vendor_id, vendor_requirement_id")
+    .eq("organization_id", organization.id)
+    .eq("id", documentId)
+    .eq("vendor_requirement_id", requirementId)
+    .maybeSingle();
+
+  if (error || !document) {
+    return { ok: false, error: error?.message ?? "Document could not be found." };
+  }
+
+  await scanDocumentVersion({
+    organizationId: organization.id,
+    documentId,
+    documentVersionId,
+    requirementId,
+    actorUserId: userId,
+  });
+
+  refreshVendorPaths(document.vendor_id as string);
   return { ok: true };
 }
 
@@ -710,6 +1051,11 @@ export async function reviewDocument(formData: FormData): Promise<ActionResult> 
   const documentVersionId = value(formData, "documentVersionId");
   const decision = value(formData, "decision");
   const note = nullableValue(formData, "note");
+  const confirmedBusinessName = nullableValue(formData, "confirmedBusinessName");
+  const confirmedPolicyNumber = nullableValue(formData, "confirmedPolicyNumber");
+  const confirmedEffectiveDate = nullableValue(formData, "confirmedEffectiveDate");
+  const confirmedExpirationDate = nullableValue(formData, "confirmedExpirationDate");
+  const confirmedIssuingAuthority = nullableValue(formData, "confirmedIssuingAuthority");
 
   if (!vendorId || !requirementId || !documentId || !documentVersionId) {
     return { ok: false, error: "Document review metadata is missing." };
@@ -719,7 +1065,70 @@ export async function reviewDocument(formData: FormData): Promise<ActionResult> 
     return { ok: false, error: "Choose a valid review decision." };
   }
 
+  if (!isValidDateString(confirmedEffectiveDate) || !isValidDateString(confirmedExpirationDate)) {
+    return { ok: false, error: "Confirmed dates must use YYYY-MM-DD format." };
+  }
+
   const supabase = createClient();
+  let documentForReviewResult = await supabase
+    .from("documents")
+    .select("id, ai_extracted_business_name, ai_extracted_policy_number, ai_extracted_effective_date, ai_extracted_expiration_date, ai_extracted_issuing_authority")
+    .eq("organization_id", organization.id)
+    .eq("id", documentId)
+    .maybeSingle();
+
+  if (isMissingColumnError(documentForReviewResult.error)) {
+    documentForReviewResult = await supabase
+      .from("documents")
+      .select("id")
+      .eq("organization_id", organization.id)
+      .eq("id", documentId)
+      .maybeSingle();
+  }
+
+  const { data: documentForReview, error: documentLookupError } = documentForReviewResult;
+  const [{ data: requirementForReview, error: requirementLookupError }] =
+    await Promise.all([
+      supabase
+        .from("vendor_requirements")
+        .select("id, expires_required")
+        .eq("organization_id", organization.id)
+        .eq("id", requirementId)
+        .maybeSingle(),
+    ]);
+
+  if (documentLookupError || !documentForReview) {
+    return { ok: false, error: documentLookupError?.message ?? "Document could not be found." };
+  }
+
+  if (requirementLookupError || !requirementForReview) {
+    return {
+      ok: false,
+      error: requirementLookupError?.message ?? "Requirement could not be found.",
+    };
+  }
+
+  if (decision === "approved" && requirementForReview.expires_required && !confirmedExpirationDate) {
+    return { ok: false, error: "Confirm an expiration date before approving this document." };
+  }
+
+  const correctedFields = correctionDiff(
+    {
+      businessName: "ai_extracted_business_name" in documentForReview ? documentForReview.ai_extracted_business_name as string | null : null,
+      policyNumber: "ai_extracted_policy_number" in documentForReview ? documentForReview.ai_extracted_policy_number as string | null : null,
+      effectiveDate: "ai_extracted_effective_date" in documentForReview ? documentForReview.ai_extracted_effective_date as string | null : null,
+      expirationDate: "ai_extracted_expiration_date" in documentForReview ? documentForReview.ai_extracted_expiration_date as string | null : null,
+      issuingAuthority: "ai_extracted_issuing_authority" in documentForReview ? documentForReview.ai_extracted_issuing_authority as string | null : null,
+    },
+    {
+      businessName: confirmedBusinessName,
+      policyNumber: confirmedPolicyNumber,
+      effectiveDate: confirmedEffectiveDate,
+      expirationDate: confirmedExpirationDate,
+      issuingAuthority: confirmedIssuingAuthority,
+    },
+  );
+
   const { error: reviewError } = await supabase.from("document_reviews").insert({
     organization_id: organization.id,
     document_id: documentId,
@@ -737,15 +1146,30 @@ export async function reviewDocument(formData: FormData): Promise<ActionResult> 
   const documentStatus = approved ? "approved" : "rejected";
   const requirementStatus = approved ? "compliant" : "missing";
 
-  const { error: documentError } = await supabase
-    .from("documents")
-    .update({
+  const documentReviewUpdate = {
       status: documentStatus,
+      business_name: confirmedBusinessName,
+      policy_number: confirmedPolicyNumber,
+      issued_at: confirmedEffectiveDate,
+      expires_at: confirmedExpirationDate,
+      issuing_authority: confirmedIssuingAuthority,
+      ai_extraction_confirmed_at: new Date().toISOString(),
+      ai_extraction_confirmed_by: userId,
+      ai_extraction_corrected_fields:
+        Object.keys(correctedFields).length > 0 ? correctedFields : null,
       approved_at: approved ? new Date().toISOString() : null,
       deficient_at: approved ? null : new Date().toISOString(),
-    })
-    .eq("organization_id", organization.id)
-    .eq("id", documentId);
+    };
+
+  const { error: documentError } = await updateWithColumnFallback(
+    (values) =>
+      supabase
+        .from("documents")
+        .update(values)
+        .eq("organization_id", organization.id)
+        .eq("id", documentId),
+    documentReviewUpdate,
+  );
 
   if (documentError) {
     return { ok: false, error: documentError.message };
@@ -753,7 +1177,7 @@ export async function reviewDocument(formData: FormData): Promise<ActionResult> 
 
   const { error: requirementError } = await supabase
     .from("vendor_requirements")
-    .update({ status: requirementStatus })
+    .update({ status: requirementStatus, expires_at: confirmedExpirationDate })
     .eq("organization_id", organization.id)
     .eq("id", requirementId);
 
@@ -773,8 +1197,25 @@ export async function reviewDocument(formData: FormData): Promise<ActionResult> 
       documentVersionId,
       note,
       decision,
+      correctedFields,
     },
   });
+
+  if (Object.keys(correctedFields).length > 0) {
+    await supabase.from("audit_logs").insert({
+      organization_id: organization.id,
+      actor_user_id: userId,
+      action: "document.ai_extraction.corrected",
+      entity_table: "documents",
+      entity_id: documentId,
+      metadata: {
+        vendorId,
+        requirementId,
+        documentVersionId,
+        correctedFields,
+      },
+    });
+  }
 
   refreshVendorPaths(vendorId);
   return { ok: true };

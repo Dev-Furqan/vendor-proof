@@ -1,4 +1,5 @@
 import { Check, ExternalLink, ReceiptText, Sparkles } from "lucide-react";
+import type { Metadata } from "next";
 import {
   createCheckoutSession,
   createCustomerPortalSession,
@@ -10,7 +11,13 @@ import {
   isTrialExpired,
   vendorOverageForPlan,
 } from "@/lib/billing/plans";
+import { formatMoney } from "@/lib/format";
 import { createClient } from "@/lib/supabase/server";
+
+export const metadata: Metadata = {
+  title: "Billing | VendorProof",
+  description: "Manage VendorProof plans, usage, and Stripe invoices.",
+};
 
 type SubscriptionRow = {
   plan?: string | null;
@@ -30,13 +37,6 @@ type InvoiceRow = {
   hosted_invoice_url: string | null;
   created_at: string | null;
 };
-
-function money(cents: number | null | undefined, currency: string | null | undefined = "usd") {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: (currency ?? "usd").toUpperCase(),
-  }).format((cents ?? 0) / 100);
-}
 
 function formatDate(date: string | null | undefined) {
   if (!date) return "—";
@@ -70,6 +70,13 @@ export default async function BillingPage({
       .eq("organization_id", organization.id)
       .eq("status", "active"),
   ]);
+
+  const queryError =
+    subscriptionResult.error ?? invoicesResult.error ?? vendorsResult.error;
+
+  if (queryError) {
+    throw new Error(queryError.message);
+  }
 
   const subscription = subscriptionResult.data as SubscriptionRow | null;
   const activeVendorCount = vendorsResult.count ?? 0;
@@ -237,7 +244,7 @@ export default async function BillingPage({
                   <td className="px-4 py-3 text-white">{invoice.stripe_invoice_id}</td>
                   <td className="px-4 py-3 capitalize text-muted">{invoice.status}</td>
                   <td className="px-4 py-3 text-muted">
-                    {money(invoice.amount_paid || invoice.amount_due, invoice.currency)}
+                    {formatMoney(invoice.amount_paid || invoice.amount_due, invoice.currency)}
                   </td>
                   <td className="px-4 py-3 text-muted">
                     {formatDate(invoice.paid_at ?? invoice.created_at)}

@@ -1,7 +1,10 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { aiExtractionIsConfigured, scanDocumentVersion } from "@/lib/ai/document-scanning";
+import { isMissingColumnError } from "@/lib/document-schema-compat";
 import { getSupabaseAdmin } from "@/lib/supabase/admin";
+import { isValidDateString } from "@/lib/validation";
 import { resolveVendorPortalToken } from "@/lib/vendor-portal/tokens";
 
 type ActionResult = {
@@ -9,6 +12,10 @@ type ActionResult = {
   error?: string;
   path?: string;
   token?: string;
+  documentId?: string;
+  documentVersionId?: string;
+  requirementId?: string;
+  aiExtractionConfigured?: boolean;
 };
 
 function value(formData: FormData, key: string) {
@@ -31,6 +38,44 @@ function sanitizeFileName(fileName: string) {
   return cleaned || "document";
 }
 
+function stripUnknownColumn<T extends Record<string, unknown>>(values: T, error: { message?: string }) {
+  const message = error.message ?? "";
+  const quoted = message.match(/'([a-zA-Z0-9_]+)'/);
+  const dotted = message.match(/column\s+[a-zA-Z0-9_]+\.([a-zA-Z0-9_]+)/i);
+  const bare = message.match(/column\s+([a-zA-Z0-9_]+)/i);
+  const column = quoted?.[1] ?? dotted?.[1] ?? bare?.[1];
+
+  if (!column || !(column in values)) {
+    return null;
+  }
+
+  const next = { ...values };
+  delete next[column];
+  return next;
+}
+
+async function updateWithColumnFallback(
+  query: (values: Record<string, unknown>) => PromiseLike<{ error: { message?: string; code?: string } | null }>,
+  values: Record<string, unknown>,
+) {
+  let nextValues = values;
+
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const result = await query(nextValues);
+    if (!result.error || !isMissingColumnError(result.error)) {
+      return result;
+    }
+
+    const stripped = stripUnknownColumn(nextValues, result.error);
+    if (!stripped) {
+      return result;
+    }
+    nextValues = stripped;
+  }
+
+  return query(nextValues);
+}
+
 async function getRequirementForToken(portalToken: string, requirementId: string) {
   const invite = await resolveVendorPortalToken(portalToken);
 
@@ -41,7 +86,7 @@ async function getRequirementForToken(portalToken: string, requirementId: string
   const admin = getSupabaseAdmin();
   const { data: requirement } = await admin
     .from("vendor_requirements")
-    .select("id, organization_id, vendor_id, property_id, document_type, name")
+    .select("id, organization_id, vendor_id, property_id, document_type, name, expires_required")
     .eq("organization_id", invite.organization_id)
     .eq("vendor_id", invite.vendor_id)
     .eq("id", requirementId)
@@ -104,6 +149,10 @@ export async function completeVendorPortalUpload(
 
   if (!invite || !requirement) {
     return { ok: false, error: "This upload link is invalid or expired." };
+  }
+
+  if (expiresAt && !isValidDateString(expiresAt)) {
+    return { ok: false, error: "Enter a valid expiration date." };
   }
 
   const admin = getSupabaseAdmin();
@@ -183,15 +232,43 @@ export async function completeVendorPortalUpload(
     };
   }
 
-  await admin
-    .from("documents")
-    .update({
+  const documentMetadataResult = await updateWithColumnFallback(
+    (values) =>
+      admin
+        .from("documents")
+        .update(values)
+        .eq("organization_id", invite.organization_id)
+        .eq("id", documentId),
+    {
       latest_document_version_id: version.id,
       status: "pending_review",
+      business_name: null,
+      policy_number: null,
+      issued_at: null,
       expires_at: expiresAt,
-    })
-    .eq("organization_id", invite.organization_id)
-    .eq("id", documentId);
+      issuing_authority: null,
+      ai_extraction_status: aiExtractionIsConfigured() ? "pending" : "disabled",
+      ai_extraction_raw: null,
+      ai_extraction_confidence: null,
+      ai_extraction_flags: [],
+      ai_extraction_usage: null,
+      ai_extraction_error: null,
+      ai_extraction_completed_at: null,
+      ai_extraction_confirmed_at: null,
+      ai_extraction_confirmed_by: null,
+      ai_extraction_corrected_fields: null,
+      ai_extracted_document_type: null,
+      ai_extracted_business_name: null,
+      ai_extracted_policy_number: null,
+      ai_extracted_effective_date: null,
+      ai_extracted_expiration_date: null,
+      ai_extracted_issuing_authority: null,
+    },
+  );
+
+  if (documentMetadataResult.error) {
+    return { ok: false, error: documentMetadataResult.error.message };
+  }
 
   await admin
     .from("vendor_requirements")
@@ -227,5 +304,62 @@ export async function completeVendorPortalUpload(
   });
 
   revalidatePath(`/vendor/${portalToken}`);
+  return {
+    ok: true,
+    documentId,
+    documentVersionId: version.id as string,
+    requirementId,
+    aiExtractionConfigured: aiExtractionIsConfigured(),
+  };
+}
+
+export async function scanVendorPortalDocument(
+  formData: FormData,
+): Promise<ActionResult> {
+  const portalToken = value(formData, "portalToken");
+  const requirementId = value(formData, "requirementId");
+  const documentId = value(formData, "documentId");
+  const documentVersionId = value(formData, "documentVersionId");
+
+  if (!portalToken || !requirementId || !documentId || !documentVersionId) {
+    return { ok: false, error: "Document extraction metadata is missing." };
+  }
+
+  const { invite, requirement } = await getRequirementForToken(
+    portalToken,
+    requirementId,
+  );
+
+  if (!invite || !requirement) {
+    return { ok: false, error: "This upload link is invalid or expired." };
+  }
+
+  const admin = getSupabaseAdmin();
+  const { data: document, error } = await admin
+    .from("documents")
+    .select("id")
+    .eq("organization_id", invite.organization_id)
+    .eq("vendor_id", invite.vendor_id)
+    .eq("vendor_requirement_id", requirementId)
+    .eq("id", documentId)
+    .maybeSingle();
+
+  if (error || !document) {
+    return { ok: false, error: error?.message ?? "Document could not be found." };
+  }
+
+  await scanDocumentVersion({
+    organizationId: invite.organization_id,
+    documentId,
+    documentVersionId,
+    requirementId,
+    actorUserId: null,
+  });
+
+  revalidatePath(`/vendor/${portalToken}`);
+  revalidatePath("/dashboard");
+  revalidatePath("/dashboard/compliance");
+  revalidatePath("/dashboard/vendors");
+  revalidatePath(`/dashboard/vendors/${invite.vendor_id}`);
   return { ok: true };
 }

@@ -1,16 +1,33 @@
 "use client";
 
 import { CheckCircle2, FileUp, TimerReset, TriangleAlert } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useMemo, useState, useTransition } from "react";
 import {
   completeVendorPortalUpload,
   createVendorPortalUpload,
+  scanVendorPortalDocument,
 } from "@/app/vendor/[token]/actions";
 import type { VendorRecord, VendorRequirementRecord } from "@/components/dashboard/types";
 import { createClient } from "@/lib/supabase/client";
 import { daysUntil, getRequirementStatus } from "@/lib/compliance/status";
 import { posthog } from "@/lib/posthog/client";
 import { useToast } from "@/components/ui/toast";
+
+const maxUploadBytes = 26_214_400;
+const allowedMimePrefixes = ["image/"];
+const allowedMimeTypes = [
+  "application/pdf",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+];
+
+function isAllowedFile(file: File) {
+  return (
+    allowedMimeTypes.includes(file.type) ||
+    allowedMimePrefixes.some((prefix) => file.type.startsWith(prefix))
+  );
+}
 
 function statusCopy(requirement: VendorRequirementRecord) {
   const status = getRequirementStatus(requirement);
@@ -42,6 +59,7 @@ function UploadCard({
   const [done, setDone] = useState(false);
   const [isPending, startTransition] = useTransition();
   const toast = useToast();
+  const router = useRouter();
   const days = daysUntil(requirement.document?.expires_at ?? requirement.expires_at);
 
   function upload() {
@@ -51,6 +69,18 @@ function UploadCard({
     if (!file) {
       setError("Choose a file first.");
       toast.error("Choose a file first");
+      return;
+    }
+
+    if (!isAllowedFile(file)) {
+      setError("Upload a PDF, Word document, or image file.");
+      toast.error("Unsupported file type");
+      return;
+    }
+
+    if (file.size > maxUploadBytes) {
+      setError("Files must be 25 MB or smaller.");
+      toast.error("File is too large");
       return;
     }
 
@@ -101,11 +131,25 @@ function UploadCard({
       });
       setFile(null);
       setDone(true);
+      if (
+        completed.aiExtractionConfigured &&
+        completed.documentId &&
+        completed.documentVersionId &&
+        completed.requirementId
+      ) {
+        const scanForm = new FormData();
+        scanForm.set("portalToken", portalToken);
+        scanForm.set("requirementId", completed.requirementId);
+        scanForm.set("documentId", completed.documentId);
+        scanForm.set("documentVersionId", completed.documentVersionId);
+        void scanVendorPortalDocument(scanForm).then(() => router.refresh());
+      }
+      router.refresh();
     });
   }
 
   return (
-    <section className="rounded-xl border border-white/10 bg-white/[0.035] p-4">
+    <section className="rounded-lg border border-white/10 bg-white/[0.035] p-4">
       <div className="flex items-start justify-between gap-3">
         <div>
           <h2 className="text-base font-semibold text-white">{requirement.name}</h2>
@@ -222,6 +266,15 @@ export function VendorPortalClient({
         </div>
 
         <div className="space-y-3">
+          {requirements.length === 0 ? (
+            <div className="rounded-lg border border-white/10 bg-white/[0.035] p-6 text-center">
+              <CheckCircle2 className="mx-auto text-emerald-200" size={24} />
+              <h2 className="mt-3 text-base font-semibold">No documents requested</h2>
+              <p className="mt-2 text-sm leading-6 text-zinc-400">
+                This upload link is valid, but there are no open checklist items right now.
+              </p>
+            </div>
+          ) : null}
           {requirements.map((requirement) => (
             <UploadCard
               key={requirement.id}

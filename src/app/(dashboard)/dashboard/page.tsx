@@ -1,7 +1,13 @@
 import Link from "next/link";
 import { ArrowRight } from "lucide-react";
+import type { Metadata } from "next";
 import { requirePrimaryOrganization } from "@/lib/auth/require-organization";
 import { createClient } from "@/lib/supabase/server";
+
+export const metadata: Metadata = {
+  title: "Dashboard | VendorProof",
+  description: "Portfolio-wide vendor compliance overview.",
+};
 
 export default async function DashboardPage() {
   const organization = await requirePrimaryOrganization();
@@ -24,6 +30,13 @@ export default async function DashboardPage() {
       .select("id", { count: "exact", head: true })
       .eq("organization_id", organization.id),
   ]);
+
+  const queryError =
+    properties.error ?? vendors.error ?? documents.error ?? templates.error;
+
+  if (queryError) {
+    throw new Error(queryError.message);
+  }
 
   const stats = [
     ["Properties", properties.count ?? 0],

@@ -1,7 +1,7 @@
 "use client";
 
 import { ArrowDown, ArrowUp, ChevronsUpDown } from "lucide-react";
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { EmptyState } from "@/components/ui/empty-state";
 
 export type DataTableColumn<T> = {
@@ -33,16 +33,29 @@ export function DataTable<T extends { id: string }>({
   const [sortDirection, setSortDirection] = useState<"asc" | "desc">("asc");
   const [page, setPage] = useState(1);
 
+  useEffect(() => {
+    setPage(1);
+  }, [rows.length]);
+
   const sortedRows = useMemo(() => {
     const clone = [...rows];
     clone.sort((a, b) => {
       const left = a[sortKey];
       const right = b[sortKey];
-      const leftText = left == null ? "" : String(left).toLowerCase();
-      const rightText = right == null ? "" : String(right).toLowerCase();
-      return sortDirection === "asc"
-        ? leftText.localeCompare(rightText)
-        : rightText.localeCompare(leftText);
+      let comparison = 0;
+
+      if (typeof left === "number" && typeof right === "number") {
+        comparison = left - right;
+      } else {
+        const leftText = left == null ? "" : String(left).toLowerCase();
+        const rightText = right == null ? "" : String(right).toLowerCase();
+        comparison = leftText.localeCompare(rightText, undefined, {
+          numeric: true,
+          sensitivity: "base",
+        });
+      }
+
+      return sortDirection === "asc" ? comparison : comparison * -1;
     });
     return clone;
   }, [rows, sortDirection, sortKey]);
@@ -62,7 +75,7 @@ export function DataTable<T extends { id: string }>({
   }
 
   return (
-    <div className="overflow-hidden rounded-lg border border-white/10 bg-white/[0.025]">
+    <div className="overflow-hidden rounded-lg border border-white/10 bg-white/[0.025] shadow-[0_18px_80px_rgba(0,0,0,0.18)]">
       <div className="overflow-x-auto">
         <table className="w-full min-w-[760px] border-collapse text-left text-sm">
           <thead className="border-b border-white/10 bg-white/[0.035] text-xs uppercase tracking-[0.14em] text-muted">
@@ -76,12 +89,24 @@ export function DataTable<T extends { id: string }>({
                   : ChevronsUpDown;
 
                 return (
-                  <th key={column.key} className={`px-4 py-3 font-medium ${column.className ?? ""}`}>
+                  <th
+                    key={column.key}
+                    className={`px-4 py-3 font-medium ${column.className ?? ""}`}
+                    aria-sort={
+                      column.sortable && active
+                        ? sortDirection === "asc"
+                          ? "ascending"
+                          : "descending"
+                        : undefined
+                    }
+                  >
                     {column.sortable ? (
                       <button
                         type="button"
                         onClick={() => sortBy(column.key)}
-                        className="inline-flex items-center gap-2 transition hover:text-white"
+                        className={`inline-flex items-center gap-2 rounded-sm transition hover:text-white ${
+                          active ? "text-white" : ""
+                        }`}
                       >
                         {column.label}
                         <Icon size={13} />
@@ -96,9 +121,9 @@ export function DataTable<T extends { id: string }>({
           </thead>
           <tbody className="divide-y divide-white/8">
             {visibleRows.map((row) => (
-              <tr key={row.id} className="transition hover:bg-white/[0.035]">
+              <tr key={row.id} className="transition hover:bg-white/[0.04]">
                 {columns.map((column) => (
-                  <td key={column.key} className={`px-4 py-3 text-muted ${column.className ?? ""}`}>
+                  <td key={column.key} className={`px-4 py-3.5 align-middle text-muted ${column.className ?? ""}`}>
                     {column.render ? column.render(row) : String(row[column.key] ?? "")}
                   </td>
                 ))}
@@ -115,7 +140,10 @@ export function DataTable<T extends { id: string }>({
           <span>
             Showing {(safePage - 1) * pageSize + 1}-{Math.min(safePage * pageSize, rows.length)} of {rows.length}
           </span>
-          <div className="flex gap-2">
+          <div className="flex items-center gap-2">
+            <span className="hidden text-xs text-muted/80 sm:inline">
+              Page {safePage} of {totalPages}
+            </span>
             <button
               type="button"
               onClick={() => setPage((current) => Math.max(1, current - 1))}

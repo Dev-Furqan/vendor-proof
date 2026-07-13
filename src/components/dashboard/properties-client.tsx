@@ -17,6 +17,7 @@ import {
 } from "@/components/dashboard/form-controls";
 import { Modal } from "@/components/dashboard/modal";
 import type { PropertyRecord } from "@/components/dashboard/types";
+import { formatDate, formatInteger } from "@/lib/format";
 import { posthog } from "@/lib/posthog/client";
 import { useToast } from "@/components/ui/toast";
 
@@ -157,14 +158,15 @@ export function PropertiesClient({ properties }: { properties: PropertyRecord[] 
       key: "unit_count",
       label: "Units",
       sortable: true,
-      render: (row) => <span className="font-mono text-white">{row.unit_count ?? 0}</span>,
+      render: (row) => (
+        <span className="font-mono text-white">{formatInteger(row.unit_count)}</span>
+      ),
     },
     {
       key: "created_at",
       label: "Created",
       sortable: true,
-      render: (row) =>
-        row.created_at ? new Date(row.created_at).toLocaleDateString() : "—",
+      render: (row) => formatDate(row.created_at),
     },
     {
       key: "id",

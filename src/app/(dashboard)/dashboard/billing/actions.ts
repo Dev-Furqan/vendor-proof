@@ -123,36 +123,50 @@ export async function createCheckoutSession(planKey: string) {
     );
   }
 
-  const stripe = getStripe();
-  const customerId = await getOrCreateStripeCustomer({
-    organizationId: organization.id,
-    organizationName: organization.name,
-  });
-  const siteUrl = getSiteUrl();
+  let checkoutUrl = "/dashboard/billing";
 
-  const session = await stripe.checkout.sessions.create({
-    mode: "subscription",
-    customer: customerId,
-    line_items: [
-      { price: plan.stripePriceId, quantity: 1 },
-      { price: meteredVendorPriceId },
-    ],
-    subscription_data: {
-      trial_period_days: 14,
+  try {
+    const stripe = getStripe();
+    const customerId = await getOrCreateStripeCustomer({
+      organizationId: organization.id,
+      organizationName: organization.name,
+    });
+    const siteUrl = getSiteUrl();
+
+    const session = await stripe.checkout.sessions.create({
+      mode: "subscription",
+      customer: customerId,
+      line_items: [
+        { price: plan.stripePriceId, quantity: 1 },
+        { price: meteredVendorPriceId },
+      ],
+      subscription_data: {
+        trial_period_days: 14,
+        metadata: {
+          organization_id: organization.id,
+          plan: plan.key,
+        },
+      },
       metadata: {
         organization_id: organization.id,
         plan: plan.key,
       },
-    },
-    metadata: {
-      organization_id: organization.id,
-      plan: plan.key,
-    },
-    success_url: `${siteUrl}/dashboard/billing?checkout=success`,
-    cancel_url: `${siteUrl}/dashboard/billing?checkout=cancelled`,
-  });
+      success_url: `${siteUrl}/dashboard/billing?checkout=success`,
+      cancel_url: `${siteUrl}/dashboard/billing?checkout=cancelled`,
+    });
 
-  redirect(session.url ?? "/dashboard/billing");
+    checkoutUrl = session.url ?? "/dashboard/billing";
+  } catch (error) {
+    redirect(
+      `/dashboard/billing?error=${encodeURIComponent(
+        error instanceof Error
+          ? error.message
+          : "Could not start Stripe checkout.",
+      )}`,
+    );
+  }
+
+  redirect(checkoutUrl);
 }
 
 export async function createCustomerPortalSession() {
@@ -176,13 +190,27 @@ export async function createCustomerPortalSession() {
     );
   }
 
-  const stripe = getStripe();
-  const portal = await stripe.billingPortal.sessions.create({
-    customer: portalSubscription.stripe_customer_id,
-    return_url: `${getSiteUrl()}/dashboard/billing`,
-  });
+  let portalUrl = "/dashboard/billing";
 
-  redirect(portal.url);
+  try {
+    const stripe = getStripe();
+    const portal = await stripe.billingPortal.sessions.create({
+      customer: portalSubscription.stripe_customer_id,
+      return_url: `${getSiteUrl()}/dashboard/billing`,
+    });
+
+    portalUrl = portal.url;
+  } catch (error) {
+    redirect(
+      `/dashboard/billing?error=${encodeURIComponent(
+        error instanceof Error
+          ? error.message
+          : "Could not open the Stripe customer portal.",
+      )}`,
+    );
+  }
+
+  redirect(portalUrl);
 }
 
 export async function reportCurrentVendorUsage() {

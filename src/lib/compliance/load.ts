@@ -11,11 +11,21 @@ import {
   buildPropertyComplianceRows,
   buildVendorComplianceRows,
 } from "@/lib/compliance/status";
+import {
+  documentSelectBase,
+  documentSelectWithAi,
+  isMissingColumnError,
+  requirementSelectBase,
+  requirementSelectWithRules,
+  type SchemaCompatResult,
+  withDocumentDefaults,
+  withRequirementDefaults,
+} from "@/lib/document-schema-compat";
 import { createClient } from "@/lib/supabase/server";
 
 export async function loadComplianceData(organizationId: string) {
   const supabase = createClient();
-  const [propertiesResult, vendorsResult, requirementsResult, documentsResult] =
+  const [propertiesResult, vendorsResult, initialRequirementsResult, initialDocumentsResult] =
     await Promise.all([
       supabase
         .from("properties")
@@ -29,15 +39,41 @@ export async function loadComplianceData(organizationId: string) {
         .order("name", { ascending: true }),
       supabase
         .from("vendor_requirements")
-        .select("id, organization_id, vendor_id, property_id, requirement_template_id, name, document_type, required, expires_required, status, due_date, expires_at, created_at, updated_at")
+        .select(requirementSelectWithRules)
         .eq("organization_id", organizationId),
       supabase
         .from("documents")
-        .select("id, organization_id, vendor_id, property_id, vendor_requirement_id, document_type, status, issued_at, expires_at, created_at, updated_at")
+        .select(documentSelectWithAi)
         .eq("organization_id", organizationId),
     ]);
+  let requirementsResult = initialRequirementsResult as SchemaCompatResult;
+  let documentsResult = initialDocumentsResult as SchemaCompatResult;
 
-  const documents = (documentsResult.data ?? []) as DocumentRecord[];
+  if (isMissingColumnError(requirementsResult.error)) {
+    requirementsResult = await supabase
+      .from("vendor_requirements")
+      .select(requirementSelectBase)
+      .eq("organization_id", organizationId);
+  }
+
+  if (isMissingColumnError(documentsResult.error)) {
+    documentsResult = await supabase
+      .from("documents")
+      .select(documentSelectBase)
+      .eq("organization_id", organizationId);
+  }
+
+  const baseError =
+    propertiesResult.error ??
+    vendorsResult.error ??
+    requirementsResult.error ??
+    documentsResult.error;
+
+  if (baseError) {
+    throw new Error(baseError.message);
+  }
+
+  const documents = ((documentsResult.data ?? []) as DocumentRecord[]).map(withDocumentDefaults);
   const documentIds = documents.map((document) => document.id);
 
   const [versionsResult, reviewsResult] =
@@ -54,10 +90,18 @@ export async function loadComplianceData(organizationId: string) {
             .eq("organization_id", organizationId)
             .in("document_id", documentIds),
         ])
-      : [{ data: [] }, { data: [] }];
+      : [{ data: [], error: null }, { data: [], error: null }];
+
+  const documentError = versionsResult.error ?? reviewsResult.error;
+
+  if (documentError) {
+    throw new Error(documentError.message);
+  }
 
   const requirements = attachDocumentsToRequirements({
-    requirements: (requirementsResult.data ?? []) as VendorRequirementRecord[],
+    requirements: ((requirementsResult.data ?? []) as VendorRequirementRecord[]).map(
+      withRequirementDefaults,
+    ),
     documents,
     versions: (versionsResult.data ?? []) as DocumentVersionRecord[],
     reviews: (reviewsResult.data ?? []) as DocumentReviewRecord[],
